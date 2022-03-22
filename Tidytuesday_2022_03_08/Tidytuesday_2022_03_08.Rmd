@@ -1,0 +1,352 @@
+---
+title: "UFC ELO Scores History"
+author: "Henry Truong"
+date: "19/03/2022"
+output: 
+  html_document:
+    keep_md: yes
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE,
+                      error = FALSE, message = FALSE, warning = FALSE,
+                      fig.align = "center", comment = "")
+```
+
+## **1. Introduction**
+
+This work is inspired and instructed by **[Andrew Couch](https://github.com/andrew-couch)**. I would like to express my deepest appreciation to him. The topic is about UFC Match History. The data can be accessed via **[this link](https://www.kaggle.com/rajeevw/ufcdata)**.
+
+The work focuses on cleaning data, performing exploratory analysis, building and tweaking a model and further performing exploratory analysis. Codes used for this work can be found in **[my github](https://github.com/tmhuy0510/Tidy_Tuesday/tree/main/Tidytuesday_2022_03_08)**.  
+
+There are 3 main questions will be answered:  
+
+  1. How to calculate ELO scores for UFC fighters after their matches  
+  2. How to predict the probability that a fighter wins his/her opponent  
+  3. What match are biggest upsets in UFC history  
+  
+The content is listed below:  
+
+  1. Introduction  
+  2. Getting and understanding the data  
+  3. Tidying the data  
+  4. Building an ELO model  
+  5. Tweaking the ELO model's K factor  
+  6. Performing further EDA  
+
+## **2. Getting and understanding the data**
+
+Load packages 
+```{r}
+library(tidyverse)
+library(elo)
+```
+
+Read in the data set
+```{r, cache = TRUE}
+ufc_raw <- read_csv("./data/ufc.csv")
+```
+
+Have a look at the structure of the data set using `View()` and `dim()`
+```{r, cache = TRUE, eval = FALSE}
+View(ufc_raw)
+dim(ufc_raw)
+```
+***Comment:*** The data set has 6012 rows and 144 columns.
+
+Have a look at the features of the data set
+```{r, cache = TRUE}
+ufc_raw %>% colnames()
+ufc_raw %>% colnames() %>% str_count("^B_") %>% sum()
+ufc_raw %>% colnames() %>% str_count("^B_") %>% sum()
+ufc_raw %>% colnames() %>% str_count("^[^RB]|^R[^_]|^B[^_]") %>% sum()
+```
+***Comment:***  
+  1. B and R prefixes stand for Blue and Red respectively.  
+  2. There are 69 features for B and 69 features for R.  
+  3. There are 6 shared features for both B and R: `Referee`, `date`, `location`, `Winner`, `title_bout`, `weight_class`.  
+
+Let's see if there is winning chance of fighters at the red and blue corners
+```{r, cache = TRUE}
+ufc_raw %>% count(Winner)
+```
+***Comment:*** Fighters at the red corner have a higher winning chance.  
+
+As for non-title bouts, newer fighters are likely to be assigned the blue corner. As for title bouts, challengers are likely to be assigned the blue corner.  
+
+## **3. Tidying the data**
+
+Before we move onto the further exploratory analysis, we add a primary key to the data set
+```{r, cache = TRUE}
+ufc_raw <- ufc_raw %>%
+  mutate(match_id = row_number())
+```
+***Comment:*** This primary key will become useful if we split the data set into several parts for data transformation in the column wise manner and then join the transformed parts.  
+
+Each observation of the data set is a match of 2 fighters. We would like to make a tidy data set of which each observation is a fighter in a match.  
+
+To do this, we split the original data set into 2 data sets each of which represents observations for fighters at the blue corner or red corner.
+```{r, cache = TRUE}
+r_df <- ufc_raw %>% select(-starts_with("B_")) # Notice the minus sign
+b_df <- ufc_raw %>% select(-starts_with("R_")) # Notice the minus sign
+```
+***Comment:*** Each data set should have 76 columns.
+
+To calculate ELO scores of UFC fighters, we will use the `elo` package. For more information on this package, it is recommended to refer to its vignette.  
+
+The `elo.run` function of the `elo` package basically requires 3 arguments:  
+
+  1. `formula`: A formula with at least 3 components: `Winner ~ Team_A + Team_B`  
+    1.1. `Team_A`: a character vector containing the name of Team A  
+    1.2. `Team_B`: a character vector containing the name of Team B  
+    1.3. `Winner`: a numeric vector containing `0` if Team A loses, `0.5` if Team A draws or `1` if Team A wins  
+  2. `data`: A data set of which each observation is a match  
+  3. `k`: K factor of which a higher value means the sooner effect of the match result on the ranking system  
+
+We need to change values of `Winner` column of `r_df` and `b_df` to 0, 0.5 or 1.
+```{r, cache = TRUE}
+r_df <- r_df %>% mutate(Winner = case_when(
+  Winner == "Red" ~ 1,
+  Winner == "Blue" ~ 0,
+  TRUE ~ 0.5
+))
+b_df <- b_df %>% mutate(Winner = case_when(
+  Winner == "Red" ~ 0,
+  Winner == "Blue" ~ 1,
+  TRUE ~ 0.5
+))
+```
+
+Next, we remove all prefixes `R_` and `B_` from the column names of the 2 data sets.
+```{r, cache = TRUE}
+r_df <- r_df %>% 
+  rename_all(.funs = function(x) str_replace(x, "R_", ""))
+b_df <- b_df %>% 
+  rename_all(.funs = function(x) str_replace(x, "B_", ""))
+# Check if these 2 data sets have all the same column names in pair
+all(colnames(r_df) == colnames(b_df))
+```
+***Comment:*** All the column names of 2 data sets are the same in pair.  
+
+Now we can combine the 2 data sets in the row wise manner to get a tidy data set.
+```{r, cache = TRUE}
+tidy_df <- bind_rows(r_df, b_df)
+dim(tidy_df)
+```
+***Comment:*** The data set should have 6012 x 2 = 12024 rows and 76 columns.  
+
+We can save this data set as an R object for future uses.
+```{r, cache = TRUE}
+saveRDS(tidy_df, "./r_objects/tidy_ufc.rds")
+```
+
+## **4. Building an ELO model**
+
+Because the `data` argument of the `elo.run` function requires the data set of which each observation is a match, we will use the original data set `ufc_raw` with modifications on the values of the `Winner` column.  
+```{r, cache = TRUE}
+elo_df <- ufc_raw %>% select(match_id, 1:8) %>%
+  rename(fighter = "R_fighter",
+         opponent = "B_fighter") %>% 
+  mutate(Winner = case_when(
+    Winner == "Red" ~ 1,
+    Winner == "Blue" ~ 0,
+    TRUE ~ 0.5
+  ))
+saveRDS(elo_df, "./r_objects/elo_df.rds")
+```
+
+Now we can calculate all information related to ELO scores
+```{r, cache = TRUE}
+elo_fighter <- elo.run(Winner ~ fighter + opponent,
+                       data = elo_df,
+                       k = 20)
+elo_fighter
+```
+***Comment:*** The value of K factor is initially chosen to be 20 because this value is suitable for NBA. Later on, the value of K factor will be tweaked to make it suitable for UFC.  
+
+We can get the rankings of all fighters using their ELO scores.
+```{r, cache = TRUE}
+elo_fighter_rank <- elo_fighter %>% 
+  rank.teams() %>% 
+  tibble(names = names(.),
+         ranking = .) %>% 
+  arrange(ranking)
+head(elo_fighter_rank)
+```
+***Comment:*** Jon Jones is ranked as No.1 of all time.  
+
+## **5. Tweaking the ELO model's K factor**
+
+We will now examine how K factor affects the ranking system.  
+
+First we create a helper function which returns a list of top 10 fighters using the `elo.run` function and an entered value of `k`.
+```{r, cache = TRUE}
+k_sensitivity <- function(k){
+  results <- elo.run(Winner ~ fighter + opponent, 
+                     k = k,
+                     data = elo_df)
+  
+  results %>% 
+    rank.teams() %>% 
+    tibble(names = names(.),
+           ranking = .) %>% 
+    filter(ranking <= 10) %>% 
+    arrange(ranking)
+}
+```
+
+Next we create a data frame with each row contains a value of k and a corresponding list of top 10 fighters and then unnest it.
+```{r, cache = TRUE}
+k_rankings <- tibble(k = seq(1, 101, by = 10)) %>% 
+  mutate(top_10_rankings = map(k, k_sensitivity)) %>% 
+  unnest(top_10_rankings)
+```
+
+Finally, we plot a heatmap using k values, fighters and their rankings.It should be noticed that depending on k values, some fighters may be present or not on the list of top 10.
+```{r, cache = TRUE}
+k_rankings %>% 
+  complete(k, names) %>% 
+  group_by(names) %>% 
+  mutate(avg_ranking = mean(ranking, na.rm = TRUE)) %>% 
+  ggplot(aes(k, reorder(names, -avg_ranking))) +
+  geom_tile(aes(fill = ranking)) +
+  scale_x_continuous(breaks = seq(1, 101, by = 10), 
+                     minor_breaks = NULL) +
+  labs(x = "k factor", y = NULL, fill = "Rank:") +
+  theme(panel.background = element_rect(fill = "white"),
+        axis.ticks.y = element_blank())
+```
+***Comment:***  
+  1. Some fighters may be present or not on the list of top 10 depending on k values.  
+  2. It is reasonable to pick k from 61 to 81. In this case, we will use **k = 81**.  
+
+## **6. Performing further EDA**
+
+It would make more sense if we could return a list of top 10 fighters within a certain weight class as opposed to the overall. To accomplish this, we will create a helper function.
+```{r, cache = TRUE}
+top_10_elo_by_weight_class <- function(df) {
+  elo.run(Winner ~ fighter + opponent,
+          k = 81,
+          data = df) %>% 
+    rank.teams() %>% 
+    tibble(names = names(.),
+           ranking = .) %>% 
+    arrange(ranking) %>% 
+    slice(1:10)
+}
+```
+
+Now we can get a data frame containing top 10 fighters within each weight class. The data frame shown below is for the case of `"Lightweight"`.
+```{r, cache = TRUE}
+top_10_fighters_by_weight_class <- elo_df %>% 
+  group_by(weight_class) %>% 
+  nest() %>% 
+  mutate(data = map(data, top_10_elo_by_weight_class)) %>% 
+  unnest(cols = c(data))
+top_10_fighters_by_weight_class %>% 
+  filter(weight_class == "Lightweight")
+```
+
+### **Question 1: How to calculate ELO scores for UFC fighters after their matches**
+
+We can also create a data frame containing information about how ELO scores and other parameters changed for each match.
+```{r, cache = TRUE}
+elo_history <- elo_df %>% 
+  elo.run(Winner ~ fighter + opponent, data = ., k = 81) %>% 
+  as_tibble() %>% 
+  rename("fighter" = 1, "opponent" = 2, 
+         "fighter_prob" = 3, "fighter_wins" = 4, 
+         "fighter_elo_change" = 5, "opponent_elo_change" = 6, 
+         "fighter_elo" = 7, "opponent_elo" = 8) %>% 
+  mutate(match_id = elo_df$match_id,
+         weight_class = elo_df$weight_class,
+         date = elo_df$date) %>% 
+  arrange(weight_class, match_id)
+elo_history %>% sample_n(size = 1) %>% glimpse()
+```
+
+In stead of letting each observation of `elo_history` represent a match, we create a tidy data frame named `tidy_elo_history` of which each observation represents a fighter.
+```{r, cache = TRUE}
+# Data frame for a fighter
+fighter_elo_history <- elo_history %>% 
+  select(fighter, match_id, date, weight_class, 
+         fighter_prob, fighter_wins, fighter_elo_change, fighter_elo)
+# Data frame for an opponent
+opponent_elo_history <- elo_history %>% 
+  select(opponent, match_id, date, weight_class, 
+         fighter_prob, fighter_wins, opponent_elo_change, opponent_elo) %>% 
+  mutate(fighter_prob = 1 - fighter_prob,
+         fighter_wins = 1 - fighter_wins) %>% 
+  rename_all(.funs = function(x) str_replace(x, "opponent", "fighter"))
+# Combine 2 previous data frames in a row wise manner
+tidy_elo_history <- bind_rows(fighter_elo_history, opponent_elo_history)
+# Save this tidy data frame for future uses
+saveRDS(tidy_elo_history, "./r_objects/tidy_elo_history.rds")
+```
+
+Using the tidy data frame `tidy_elo_history`, we can create plots showing the change of ELO scores and other parameters for a fighter. In this case, **Jon Jones** will be chosen.
+```{r, cache = TRUE}
+tidy_elo_history %>% 
+  filter(fighter == "Jon Jones") %>%
+  rename("ELO Scores" = fighter_elo,
+         "Winning Probability" = fighter_prob,
+         "Updated ELO Scores" = fighter_elo_change) %>% 
+  pivot_longer(c(`ELO Scores`, 
+                 `Winning Probability`, 
+                 `Updated ELO Scores`),
+               names_to = "elo_para",
+               values_to = "value") %>% 
+  ggplot(aes(date, value, color = elo_para)) +
+  geom_line(show.legend = FALSE) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(vars(elo_para), nrow = 3, scales = "free_y") +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  labs(x = NULL, y = NULL, 
+       title = "Fighting Performace of Jon Jones")
+```
+***Comment:***  
+  1. Jon Jones got beaten only 1 time.  
+  2. We used `tidy_elo_history` to make a plot instead of `elo_history` because a fighter is not always assigned at blue corner. It should be noted that if we had used `elo_history`, we would have not see a lost experienced by Jon Jones.  
+  
+### **Question 2: How to predict the probability that a fighter wins his/her opponent**
+
+We can naively predict the probability that a fighter beats his/her opponent. Let's see how this works for the match **Khabib Nurmagomedov** vs. **Conor McGregor**.
+```{r, cache = TRUE}
+elo.run(Winner ~ fighter + opponent,
+        data = elo_df,
+        k = 81) %>% 
+  predict(newdata = tibble(fighter = "Khabib Nurmagomedov", 
+                           opponent = "Conor McGregor"))
+```
+***Comment:*** Khabib Nurmagomedov is favored to be the winner of the match. This actually happened.  
+
+Moreover, we can see what matches have biggest ELO change for fighters or matches have biggest upsets.
+```{r, cache = TRUE}
+elo_history %>% 
+  group_by(fighter_elo_change > 0) %>% 
+  slice_max(abs(fighter_elo_change), n = 5) %>% 
+  ggplot(aes(x = fighter_elo_change, 
+             y = reorder(as_factor(match_id), fighter_elo_change), 
+             fill = fighter_elo_change > 0)) +
+  geom_col(show.legend = FALSE) +
+  scale_x_continuous(breaks = seq(-70, 80, by = 10), 
+                     minor_breaks = NULL) +
+  labs(x = "Elo change of the fighter assigned the blue corner",
+       y = "Match ID",
+       title = "Biggest increases and decreases in elo")
+```
+
+### **Question 3: What match are biggest upsets in UFC history**
+
+We can drill further down into these biggest upsets to find out who were the fighters.
+```{r, cache = TRUE}
+elo_history %>% 
+  select(match_id, fighter, opponent, fighter_elo, opponent_elo, fighter_elo_change) %>% 
+  semi_join(elo_history %>% 
+              group_by(fighter_elo_change > 0) %>%
+              slice_max(abs(fighter_elo_change), n = 5),
+            by = "match_id") %>% 
+  arrange(-abs(fighter_elo_change))
+```
+***Comment:*** Now we see that the only match Jon Jones lost is in the top 5 biggest upset of UFC history.  
+
